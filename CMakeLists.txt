@@ -16,7 +16,8 @@ set(SERVER_SOURCES
     src/server/db.cpp
     src/server/redis.cpp
     src/server/model.cpp
-    src/server/logger.cpp)
+    src/server/logger.cpp
+    src/server/config.cpp)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
 add_executable(chat_server ${SERVER_SOURCES})

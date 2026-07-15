@@ -3,6 +3,7 @@
 #include "db.h"
 #include "model.h"
 #include "logger.h"
+#include "config.h"
 #include <iostream>
 #include <openssl/sha.h>
 #include <iomanip>
@@ -382,7 +383,10 @@ ChatService::ChatService() {
     };
 
     // ==================== Redis 跨服通信初始化 ====================
-    if (redis_.connect()) {
+        // ==================== Redis 跨服通信初始化 ====================
+    auto* cfg = Config::instance();
+    if (redis_.connect(cfg->getString("redis", "host", "127.0.0.1"),
+                       cfg->getInt("redis", "port", 6379))) {
         redis_.setNotifyCallback([this](const std::string&, const std::string& msg) {
             onRedisMessage("chat_server", msg);
         });

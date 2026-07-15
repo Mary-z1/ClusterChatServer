@@ -1,5 +1,6 @@
 #include "db.h"
 #include "logger.h"
+#include "config.h" 
 #include <iostream>
 
 MySQL::MySQL() : conn_(nullptr), alive_(false) {}
@@ -48,65 +49,71 @@ MYSQL_RES* MySQL::query(const std::string& sql) {
 MYSQL* MySQL::getConnection() { return conn_; }
 
 // ============ ConnectionPool ============
-
 ConnectionPool* ConnectionPool::instance() {
     static ConnectionPool pool;
     return &pool;
 }
-
 ConnectionPool::ConnectionPool()
-    : maxSize_(8), initOk_(false),
-      host_("127.0.0.1"), port_(3306),
-      user_("chatuser"), password_("123456"),
-      dbname_("chat") {
+    : initOk_(false)
+{
+    auto* cfg = Config::instance();
+    host_     = cfg->getString("mysql", "host",     "127.0.0.1");
+    port_     = cfg->getInt(   "mysql", "port",     3306);
+    user_     = cfg->getString("mysql", "user",     "chatuser");
+    password_ = cfg->getString("mysql", "password", "123456");
+    dbname_   = cfg->getString("mysql", "db",       "chat");
+    maxSize_  = cfg->getInt(   "mysql", "poolSize", 4);
+    int initSize = maxSize_;
+
     sem_init(&sem_, 0, maxSize_);
-    initPool(4);
+    initPool(initSize);
 }
-
-void ConnectionPool::initPool(int initialSize) {
-    for (int i = 0; i < initialSize; i++) {
-        produceConnection();
+// ========== 初始化连接池 ==========
+void ConnectionPool::initPool(int size) {
+    for (int i = 0; i < size; ++i) {
+        MySQL* mysql = new MySQL();
+        if (mysql->connect(host_, port_, user_, password_, dbname_)) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            pool_.push(mysql);
+            sem_post(&sem_);
+        } else {
+            delete mysql;
+        }
     }
-    // 至少有一个连接成功才算初始化成功
-    std::lock_guard<std::mutex> lock(mtx_);
-    initOk_ = !pool_.empty();
-    if (!initOk_) {
-        LOG_ERROR("[Pool] FATAL: no connection established!");
-    }
-}
-
-void ConnectionPool::produceConnection() {
-    MySQL* mysql = new MySQL();
-    if (mysql->connect(host_, port_, user_, password_, dbname_)) {
-        std::lock_guard<std::mutex> lock(mtx_);
-        pool_.push(mysql);
-        sem_post(&sem_);
-        LOG_INFO("[Pool] connection OK, pool size: %zu", pool_.size());
-    } else {
-        delete mysql;
+    if (!pool_.empty()) {
+        initOk_.store(true);
     }
 }
 
+// ========== 获取连接（信号量阻塞等待 + 重连） ==========
 std::shared_ptr<MySQL> ConnectionPool::getConnection() {
-    if (!initOk_) tryReconnect();// 尝试重连
-    // 初始化失败直接返回空
-    if (!initOk_) {
-        LOG_ERROR("[Pool] not initialized, cannot get connection");
-        return nullptr;
+    // 如果池子坏了，尝试重连
+    if (!initOk_.load()) {
+        tryReconnect();
+        if (!initOk_.load()) return nullptr;
     }
+
     sem_wait(&sem_);
     std::lock_guard<std::mutex> lock(mtx_);
-    if (pool_.empty()) {
-        // 防御：信号量计数异常时
-        sem_post(&sem_);  // 归还信号量
-        return nullptr;
-    }
-    MySQL* mysql = pool_.front();
+    MySQL* raw = pool_.front();
     pool_.pop();
-    return std::shared_ptr<MySQL>(mysql, [this](MySQL* conn) {
-        std::lock_guard<std::mutex> lock(mtx_);
-        pool_.push(conn);
-        sem_post(&sem_);
+
+    // 检查连接是否存活，不存活则重连
+    if (!raw->isAlive()) {
+        LOG_WARN("[Pool] dead connection, reconnecting...");
+        if (!raw->connect(host_, port_, user_, password_, dbname_)) {
+            delete raw;
+            LOG_ERROR("[Pool] reconnect failed, dropping connection");
+            return nullptr;
+        }
+    }
+
+    return std::shared_ptr<MySQL>(raw, [this](MySQL* p) {
+        if (p) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            pool_.push(p);
+            sem_post(&sem_);
+        }
     });
 }
 // ========== 自动重连 ==========
