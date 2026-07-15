@@ -1,0 +1,17 @@
+# 构建产物
+build/
+bin/
+*.o
+*.out
+
+# IDE
+.vscode/
+
+# 备份
+*.bak
+
+# 第三方库（muduo 太大，json.hpp 是单文件可保留）
+thirdparty/muduo/
+
+# 日志
+logs/
