@@ -99,12 +99,12 @@ ChatService::ChatService() {
                     snprintf(sql, sizeof(sql),
                              "UPDATE User SET state='online' WHERE id=%d", uid);
                     mysql->update(sql);
-
                     {
                         std::lock_guard<std::mutex> lk(
                             ChatService::instance()->onlineMtx_);
                         ChatService::instance()->onlineUsers_[uid] = conn;
                     }
+                    ChatService::instance()->resetActiveTime(uid);  // ← 新增
                     LOG_INFO("[LOGIN] %s (id=%d)", name.c_str(), uid);
                 }
             }
@@ -383,7 +383,6 @@ ChatService::ChatService() {
     };
 
     // ==================== Redis 跨服通信初始化 ====================
-        // ==================== Redis 跨服通信初始化 ====================
     auto* cfg = Config::instance();
     if (redis_.connect(cfg->getString("redis", "host", "127.0.0.1"),
                        cfg->getInt("redis", "port", 6379))) {
@@ -395,6 +394,16 @@ ChatService::ChatService() {
     } else {
         LOG_ERROR("[Redis] WARNING: Redis unavailable, cross-server chat disabled");
     }
+    // ========== 阶段8d：心跳 PING / PONG ==========
+    handlers_[PING_MSG] = [](const TcpConnectionPtr& conn,
+                              json&, Timestamp) {
+        json resp;
+        resp["msgid"] = PONG_MSG;
+        conn->send(resp.dump());
+    };
+    handlers_[PONG_MSG] = [](const TcpConnectionPtr&, json&, Timestamp) {
+        // 客户端发来的 PONG，活跃时间已在 handleMessage 中更新
+    };
 }
 
 // ==================== Redis 跨服消息回调 ====================
@@ -452,6 +461,11 @@ void ChatService::handleConnection(const TcpConnectionPtr& conn) {
             if (it->second == conn) {
                 int uid = it->first;
                 onlineUsers_.erase(it);
+                {
+                    std::lock_guard<std::mutex> lk2(
+                        ChatService::instance()->activeMtx_);
+                    ChatService::instance()->lastActiveTime_.erase(uid);
+                }
                 auto mysql = ConnectionPool::instance()->getConnection();
                 if (mysql) {
                     char sql[128];
@@ -483,6 +497,10 @@ void ChatService::handleMessage(const TcpConnectionPtr& conn,
     } catch (const json::parse_error& e) {
                 LOG_ERROR("[ERROR] JSON parse: %s", e.what());
         return;
+    }
+    int uid = getUidByConn(conn);
+    if (uid != -1) {
+        resetActiveTime(uid);
     }
     auto handler = getHandler(js["msgid"].get<int>());
     handler(conn, js, time);
@@ -546,4 +564,63 @@ void ChatService::handleGroupChat(const TcpConnectionPtr& conn, json& js) {
         }
     }
     LOG_INFO("[GROUP_CHAT] uid=%d to group %d: %s", senderId, groupid, message.c_str());
+}
+// ==================== 阶段8d：心跳机制 ====================
+
+void ChatService::startHeartbeat(muduo::net::EventLoop* loop) {
+    loop->runEvery(kHeartbeatInterval, [this]() {
+        checkHeartbeat();
+    });
+    LOG_INFO("[HEARTBEAT] timer started (interval=%.0fs, timeout=%.0fs)",
+             kHeartbeatInterval, kHeartbeatTimeout);
+}
+
+void ChatService::checkHeartbeat() {
+    Timestamp now = Timestamp::now();
+    std::vector<int> timeoutUids;
+
+    // 第一步：找出所有超时的 uid（只锁 activeMtx_）
+    {
+        std::lock_guard<std::mutex> lock(activeMtx_);
+        for (auto it = lastActiveTime_.begin(); it != lastActiveTime_.end(); ) {
+            if (muduo::timeDifference(now, it->second) > kHeartbeatTimeout) {
+                timeoutUids.push_back(it->first);
+                it = lastActiveTime_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // 第二步：逐个踢下线（不再持有 activeMtx_，避免死锁）
+    for (int uid : timeoutUids) {
+        TcpConnectionPtr conn;
+        {
+            std::lock_guard<std::mutex> lock(onlineMtx_);
+            auto it = onlineUsers_.find(uid);
+            if (it != onlineUsers_.end()) {
+                conn = it->second;
+                onlineUsers_.erase(it);
+            }
+        }
+
+        if (conn) {
+            // 更新 DB 状态为 offline
+            auto mysql = ConnectionPool::instance()->getConnection();
+            if (mysql) {
+                char sql[128];
+                snprintf(sql, sizeof(sql),
+                         "UPDATE User SET state='offline' WHERE id=%d", uid);
+                mysql->update(sql);
+            }
+
+            LOG_INFO("[HEARTBEAT] uid=%d timeout, kicking off", uid);
+            conn->shutdown();   // muduo 线程安全
+        }
+    }
+}
+
+void ChatService::resetActiveTime(int uid) {
+    std::lock_guard<std::mutex> lock(activeMtx_);
+    lastActiveTime_[uid] = Timestamp::now();
 }

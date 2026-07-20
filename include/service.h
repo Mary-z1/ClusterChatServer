@@ -5,6 +5,7 @@
 #include "redis.h"
 #include <unordered_map>
 #include <mutex>
+#include <muduo/net/EventLoop.h>
 
 class ChatService {
 public:
@@ -12,6 +13,9 @@ public:
     MsgHandler getHandler(int msgid);
     void handleConnection(const TcpConnectionPtr& conn);
     void handleMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp time);
+
+    // ========== 阶段8d：心跳机制（public，供 main 调用）==========
+    void startHeartbeat(muduo::net::EventLoop* loop);
 
     // 在线用户与锁
     std::unordered_map<int, TcpConnectionPtr> onlineUsers_;
@@ -24,15 +28,18 @@ private:
     ChatService();
     std::unordered_map<int, MsgHandler> handlers_;
 
-    // Redis 订阅回调
     void onRedisMessage(const std::string& channel, const std::string& message);
-
-    // ========== 阶段7新增：辅助方法 ==========
-    // 通过 conn 反查 uid（-1 表示未登录）
     int getUidByConn(const TcpConnectionPtr& conn);
-
-    // 处理群聊消息的核心逻辑（本机转发 + Redis 发布 + 离线存储）
     void handleGroupChat(const TcpConnectionPtr& conn, json& js);
+
+    // 心跳内部方法（private）
+    void checkHeartbeat();
+    void resetActiveTime(int uid);
+
+    std::unordered_map<int, muduo::Timestamp> lastActiveTime_;
+    std::mutex activeMtx_;
+    static constexpr double kHeartbeatInterval = 10.0;
+    static constexpr double kHeartbeatTimeout  = 90.0;
 };
 
 #endif

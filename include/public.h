@@ -28,4 +28,6 @@ enum EnMsgType {
     CREATE_GROUP_MSG_ACK,// 创建群组响应   (=11)
     ADD_GROUP_MSG_ACK,   // 加入群组响应   (=12)
     GROUP_CHAT_MSG_ACK,  // 群组聊天响应   (=13)
+    PING_MSG,            // 心跳请求       (=14)
+    PONG_MSG             // 心跳响应       (=15)
 };

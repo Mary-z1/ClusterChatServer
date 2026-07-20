@@ -1,7 +1,8 @@
 // src/server/main.cpp
 #include "server.h"
 #include "logger.h"
-#include "config.h"          
+#include "config.h"   
+#include "service.h"       
 #include <iostream>
 #include <cstdlib>
 #include <csignal>
@@ -70,6 +71,7 @@ int main(int argc, char* argv[])
 
     LOG_INFO("ChatServer started on port %d", port);
     server.start();
+    ChatService::instance()->startHeartbeat(&loop);
     loop.loop();
 
     LOG_INFO("ChatServer stopped.");
