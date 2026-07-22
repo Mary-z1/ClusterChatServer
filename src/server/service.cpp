@@ -45,7 +45,7 @@ static void sendError(const TcpConnectionPtr& conn,
     resp["msgid"] = msgid;
     resp["errno"] = errno_;
     resp["errmsg"] = msg;
-    conn->send(resp.dump());
+    conn->send(resp.dump() + "\n");
 }
 
 // ==================== 单例 ====================
@@ -110,27 +110,50 @@ ChatService::ChatService() {
             }
             mysql_free_result(res);
         }
-        conn->send(response.dump());
+        conn->send(response.dump() + "\n");
 
-        // ⭐ 登录成功 → 推送离线消息（uid > 0 即成功）
-        if (uid > 0) {
-            char offSql[2048];
-            snprintf(offSql, sizeof(offSql),
-                "SELECT message FROM OfflineMessage WHERE userid = %d", uid);
-            MYSQL_RES* offRes = mysql->query(offSql);
-            if (offRes) {
-                MYSQL_ROW offRow;
-                while ((offRow = mysql_fetch_row(offRes))) {
-                    conn->send(offRow[0]);    // 原样发送 JSON 消息
-                }
-                mysql_free_result(offRes);
-                // 推送完毕，清理
-                snprintf(offSql, sizeof(offSql),
-                    "DELETE FROM OfflineMessage WHERE userid = %d", uid);
-                mysql->update(offSql);
-                LOG_INFO("[LOGIN] offline msgs pushed & cleared, uid=%d", uid);
+// ⭐ 登录成功 → 先推送离线消息，再推送好友列表
+if (uid > 0) {
+    // ① 推送离线消息
+    {
+        char offSql[2048];
+        snprintf(offSql, sizeof(offSql),
+            "SELECT message FROM OfflineMessage WHERE userid = %d", uid);
+        MYSQL_RES* offRes = mysql->query(offSql);
+        if (offRes) {
+            MYSQL_ROW offRow;
+            while ((offRow = mysql_fetch_row(offRes))) {
+                conn->send(std::string(offRow[0]) + "\n");
             }
+            mysql_free_result(offRes);
+            // 推送完立即删除
+            snprintf(offSql, sizeof(offSql),
+                "DELETE FROM OfflineMessage WHERE userid = %d", uid);
+            mysql->update(offSql);
+            LOG_INFO("[LOGIN] offline msgs pushed & cleared, uid=%d", uid);
         }
+    }
+    // ② 推送好友列表（保留现有代码不变）
+    char friendSql[512];
+    snprintf(friendSql, sizeof(friendSql),
+        "SELECT u.id, u.name FROM Friend f "
+        "JOIN User u ON f.friendid = u.id "
+        "WHERE f.userid = %d", uid);
+    MYSQL_RES* fRes = mysql->query(friendSql);
+    if (fRes) {
+        MYSQL_ROW fRow;
+        while ((fRow = mysql_fetch_row(fRes))) {
+            json fj;
+            fj["msgid"] = ONE_CHAT_MSG;
+            fj["id"] = std::stoi(fRow[0]);
+            fj["name"] = fRow[1];
+            fj["msg"] = "";    // 空消息 → 客户端不打印，仅填充好友字典
+            conn->send(fj.dump() + "\n");
+        }
+        mysql_free_result(fRes);
+        LOG_INFO("[LOGIN] friend list pushed, uid=%d", uid);
+    }
+}
     };
 
     // ====== 注册 ======
@@ -138,8 +161,7 @@ ChatService::ChatService() {
                              json& js, Timestamp) {
         std::string name = js.value("name", "");
         std::string password = js.value("password", "");
-
-                LOG_INFO("[REG_MSG] name: %s", name.c_str());
+        LOG_INFO("[REG_MSG] received: name=%s", name.c_str());
 
         // ⭐ 输入校验
         std::string err = validateName(name);
@@ -181,13 +203,13 @@ ChatService::ChatService() {
                 response["errno"] = 2; response["errmsg"] = "insert failed";
             }
         }
-        conn->send(response.dump());
+        conn->send(response.dump() + "\n");
     };
 
         // ─────────── 一对一聊天 ───────────
     handlers_[ONE_CHAT_MSG] = [](const TcpConnectionPtr& conn, json& js, Timestamp) {
-        int to_id   = js["to_id"].get<int>();
-        std::string msg = js["message"].get<std::string>();
+        int to_id   = js.value("toid", 0);
+        std::string msg = js.value("msg", "");
 
         if (msg.empty() || msg.size() > 5000) return;
 
@@ -199,7 +221,7 @@ ChatService::ChatService() {
             auto it = svc->onlineUsers_.find(to_id);
             if (it != svc->onlineUsers_.end()) {
                 // 目标在本机在线 → 直接转发
-                it->second->send(js.dump());
+                it->second->send(js.dump() + "\n");
                                 LOG_INFO("[CHAT] local forward to uid=%d", to_id);
                 return;
             }
@@ -275,10 +297,11 @@ ChatService::ChatService() {
             json resp;
             resp["msgid"] = ADD_FRIEND_MSG_ACK;
             resp["errno"] = 0;
-            conn->send(resp.dump());
+            conn->send(resp.dump() + "\n");
             LOG_INFO("[FRIEND] uid=%d added friend=%d", uid, friendid);
-            sendError(conn, ADD_FRIEND_MSG_ACK, 6, "add friend failed");
+            return;
         }
+        sendError(conn, ADD_FRIEND_MSG_ACK, 6, "add friend failed");
     };
 
     // ========== 阶段7新增：创建群组 ==========
@@ -316,7 +339,7 @@ ChatService::ChatService() {
         resp["errno"] = 0;
         resp["groupid"] = groupid;
         resp["groupname"] = groupname;
-        conn->send(resp.dump());
+        conn->send(resp.dump() + "\n");
         LOG_INFO("[GROUP] uid=%d created group '%s' (id=%d)", uid, groupname.c_str(), groupid);
     };
     // ========== 阶段7新增：加入群组 ==========
@@ -369,7 +392,7 @@ ChatService::ChatService() {
             resp["msgid"] = ADD_GROUP_MSG_ACK;
             resp["errno"] = 0;
             resp["groupid"] = groupid;
-            conn->send(resp.dump());
+            conn->send(resp.dump() + "\n");
             LOG_INFO("[GROUP] uid=%d joined group %d", uid, groupid);
         } else {
             sendError(conn, ADD_GROUP_MSG_ACK, 5, "join group failed");
@@ -394,12 +417,80 @@ ChatService::ChatService() {
     } else {
         LOG_ERROR("[Redis] WARNING: Redis unavailable, cross-server chat disabled");
     }
+        // ========== 删除好友 ==========
+    handlers_[DEL_FRIEND_MSG] = [](const TcpConnectionPtr& conn,
+                                    json& js, Timestamp) {
+        int uid = ChatService::instance()->getUidByConn(conn);
+        if (uid == -1) {
+            sendError(conn, DEL_FRIEND_MSG_ACK, 1, "not logged in");
+            return;
+        }
+
+        int friendid = js.value("friendid", 0);
+        if (friendid <= 0) {
+            sendError(conn, DEL_FRIEND_MSG_ACK, 2, "invalid friendid");
+            return;
+        }
+
+        auto mysql = ConnectionPool::instance()->getConnection();
+        if (!mysql) {
+            sendError(conn, DEL_FRIEND_MSG_ACK, 99, "database unavailable");
+            return;
+        }
+
+        // 双向删除：A删B 且 B删A
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+            "DELETE FROM Friend WHERE (userid=%d AND friendid=%d) OR (userid=%d AND friendid=%d)",
+            uid, friendid, friendid, uid);
+        mysql->update(sql);
+
+        json resp;
+        resp["msgid"] = DEL_FRIEND_MSG_ACK;
+        resp["errno"] = 0;
+        conn->send(resp.dump() + "\n");
+        LOG_INFO("[FRIEND] uid=%d deleted friend=%d", uid, friendid);
+    };
+
+    // ========== 退出群组 ==========
+    handlers_[QUIT_GROUP_MSG] = [](const TcpConnectionPtr& conn,
+                                    json& js, Timestamp) {
+        int uid = ChatService::instance()->getUidByConn(conn);
+        if (uid == -1) {
+            sendError(conn, QUIT_GROUP_MSG_ACK, 1, "not logged in");
+            return;
+        }
+
+        int groupid = js.value("groupid", 0);
+        if (groupid <= 0) {
+            sendError(conn, QUIT_GROUP_MSG_ACK, 2, "invalid groupid");
+            return;
+        }
+
+        auto mysql = ConnectionPool::instance()->getConnection();
+        if (!mysql) {
+            sendError(conn, QUIT_GROUP_MSG_ACK, 99, "database unavailable");
+            return;
+        }
+
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+            "DELETE FROM GroupUser WHERE groupid=%d AND userid=%d",
+            groupid, uid);
+        mysql->update(sql);
+
+        json resp;
+        resp["msgid"] = QUIT_GROUP_MSG_ACK;
+        resp["errno"] = 0;
+        conn->send(resp.dump() + "\n");
+        LOG_INFO("[GROUP] uid=%d quit group %d", uid, groupid);
+    };
     // ========== 阶段8d：心跳 PING / PONG ==========
     handlers_[PING_MSG] = [](const TcpConnectionPtr& conn,
                               json&, Timestamp) {
         json resp;
         resp["msgid"] = PONG_MSG;
-        conn->send(resp.dump());
+        conn->send(resp.dump() + "\n");
     };
     handlers_[PONG_MSG] = [](const TcpConnectionPtr&, json&, Timestamp) {
         // 客户端发来的 PONG，活跃时间已在 handleMessage 中更新
@@ -420,11 +511,11 @@ void ChatService::onRedisMessage(const std::string&, const std::string& message)
 
     // ===== 一对一聊天（已有） =====
     if (msgid == ONE_CHAT_MSG) {
-        int to_id = js["to_id"].get<int>();
+        int to_id = js.value("toid", 0);
         std::lock_guard<std::mutex> lock(onlineMtx_);
         auto it = onlineUsers_.find(to_id);
         if (it != onlineUsers_.end()) {
-            it->second->send(js.dump());
+            it->second->send(js.dump() + "\n");
                         LOG_INFO("[Redis] cross-server forward to uid=%d", to_id);
         }
         return;
@@ -443,7 +534,7 @@ void ChatService::onRedisMessage(const std::string&, const std::string& message)
         for (int memberId : members) {
             auto it = onlineUsers_.find(memberId);
             if (it != onlineUsers_.end()) {
-                it->second->send(js.dump());
+                it->second->send(js.dump() + "\n");
                 LOG_INFO("[Redis] cross-server group forward to memberId=%d", memberId);
             }
         }
@@ -541,7 +632,7 @@ void ChatService::handleGroupChat(const TcpConnectionPtr& conn, json& js) {
             if (memberId == senderId) continue;  // 不发给自己
             auto it = onlineUsers_.find(memberId);
             if (it != onlineUsers_.end()) {
-                it->second->send(js.dump());
+                it->second->send(js.dump() + "\n");
                 LOG_INFO("[GROUP_CHAT] local forward to memberId=%d", memberId);
             }
         }

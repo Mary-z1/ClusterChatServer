@@ -29,5 +29,9 @@ enum EnMsgType {
     ADD_GROUP_MSG_ACK,   // 加入群组响应   (=12)
     GROUP_CHAT_MSG_ACK,  // 群组聊天响应   (=13)
     PING_MSG,            // 心跳请求       (=14)
-    PONG_MSG             // 心跳响应       (=15)
+    PONG_MSG,          // 心跳响应       (=15)
+    DEL_FRIEND_MSG,      // 16  删除好友   (=16)
+    DEL_FRIEND_MSG_ACK,  // 17  删除好友响应 (=17)
+    QUIT_GROUP_MSG,      // 18  退出群组   (=18)
+    QUIT_GROUP_MSG_ACK,  // 19  退出群组响应 (=19)
 };
