@@ -153,6 +153,35 @@ if (uid > 0) {
         mysql_free_result(fRes);
         LOG_INFO("[LOGIN] friend list pushed, uid=%d", uid);
     }
+        // ③ 推送群组列表
+    {
+        char groupSql[512];
+        snprintf(groupSql, sizeof(groupSql),
+            "SELECT g.id, g.name, COUNT(gu2.userid) AS member_count "
+            "FROM GroupUser gu "
+            "JOIN GroupInfo g ON gu.groupid = g.id "
+            "JOIN GroupUser gu2 ON gu2.groupid = g.id "
+            "WHERE gu.userid = %d "
+            "GROUP BY g.id, g.name", uid);
+        MYSQL_RES* gRes = mysql->query(groupSql);
+        if (gRes) {
+            json gj;
+            gj["msgid"] = GROUP_LIST_MSG;
+            json groupsArr = json::array();
+            MYSQL_ROW gRow;
+            while ((gRow = mysql_fetch_row(gRes))) {
+                json g;
+                g["id"] = std::stoi(gRow[0]);
+                g["name"] = gRow[1];
+                g["members"] = std::stoi(gRow[2]);
+                groupsArr.push_back(g);
+            }
+            mysql_free_result(gRes);
+            gj["groups"] = groupsArr;
+            conn->send(gj.dump() + "\n");
+            LOG_INFO("[LOGIN] group list pushed, uid=%d", uid);
+        }
+    }
 }
     };
 
@@ -485,6 +514,40 @@ if (uid > 0) {
         conn->send(resp.dump() + "\n");
         LOG_INFO("[GROUP] uid=%d quit group %d", uid, groupid);
     };
+        // ========== 好友状态查询 ==========
+    handlers_[FRIEND_STATUS_REQ] = [](const TcpConnectionPtr& conn,
+                                       json& js, Timestamp) {
+        int uid = ChatService::instance()->getUidByConn(conn);
+        if (uid == -1) return;
+
+        auto mysql = ConnectionPool::instance()->getConnection();
+        if (!mysql) return;
+
+        // 查所有好友的 id, name, state
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "SELECT u.id, u.name, u.state FROM Friend f "
+            "JOIN User u ON f.friendid = u.id "
+            "WHERE f.userid = %d", uid);
+        MYSQL_RES* res = mysql->query(sql);
+        if (!res) return;
+
+        json resp;
+        resp["msgid"] = FRIEND_STATUS_ACK;
+        json friendsArr = json::array();
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+            json fj;
+            fj["id"] = std::stoi(row[0]);
+            fj["name"] = row[1];
+            fj["online"] = (std::string(row[2]) == "online");
+            friendsArr.push_back(fj);
+        }
+        mysql_free_result(res);
+        resp["friends"] = friendsArr;
+        conn->send(resp.dump() + "\n");
+        LOG_INFO("[FRIEND_STATUS] uid=%d queried friend status", uid);
+    };
     // ========== 阶段8d：心跳 PING / PONG ==========
     handlers_[PING_MSG] = [](const TcpConnectionPtr& conn,
                               json&, Timestamp) {
@@ -524,6 +587,7 @@ void ChatService::onRedisMessage(const std::string&, const std::string& message)
     // ===== 阶段7新增：群组聊天跨服转发 =====
     if (msgid == GROUP_CHAT_MSG) {
         int groupid = js["groupid"].get<int>();
+        int senderId = js.value("id", 0);
 
         auto mysql = ConnectionPool::instance()->getConnection();
         if (!mysql) return;
@@ -531,11 +595,18 @@ void ChatService::onRedisMessage(const std::string&, const std::string& message)
         auto members = GroupModel::queryMembers(mysql.get(), groupid);
 
         std::lock_guard<std::mutex> lock(onlineMtx_);
+
+        // ⭐ 发送者在本机 → handleGroupChat 已转发过，跳过
+        bool senderIsLocal = (onlineUsers_.find(senderId) != onlineUsers_.end());
+
         for (int memberId : members) {
+            if (memberId == senderId) continue;
             auto it = onlineUsers_.find(memberId);
             if (it != onlineUsers_.end()) {
-                it->second->send(js.dump() + "\n");
-                LOG_INFO("[Redis] cross-server group forward to memberId=%d", memberId);
+                if (!senderIsLocal) {   // ⭐ 只有跨服消息才转发
+                    it->second->send(js.dump() + "\n");
+                    LOG_INFO("[Redis] cross-server group forward to memberId=%d", memberId);
+                }
             }
         }
     }
@@ -609,7 +680,7 @@ int ChatService::getUidByConn(const TcpConnectionPtr& conn) {
 // ========== 阶段7新增：群聊消息处理 ==========
 void ChatService::handleGroupChat(const TcpConnectionPtr& conn, json& js) {
     int groupid = js.value("groupid", 0);
-    std::string message = js.value("message", "");
+    std::string message = js.value("msg", "");
 
     if (groupid <= 0 || message.empty() || message.size() > 5000) return;
 

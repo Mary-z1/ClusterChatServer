@@ -2,18 +2,22 @@
 #include "server.h"
 #include "logger.h"
 #include "config.h"   
-#include "service.h"       
+#include "service.h"   
+#include "db.h"   // ConnectionPool    
 #include <iostream>
 #include <cstdlib>
 #include <csignal>
+#include <unistd.h>
 
 static EventLoop* g_loop = nullptr;
+static std::atomic<bool> g_shuttingDown{false};
+static ChatServer* g_server = nullptr;
 
 void signalHandler(int sig)
 {
     std::cout << "\n[main] Received signal " << sig << ", shutting down..." << std::endl;
-    if (g_loop) {
-        g_loop->quit();
+    if (g_server) {
+        g_server->stop();   // ← 这会在 loop 线程中 quit
     }
 }
 
@@ -68,13 +72,20 @@ int main(int argc, char* argv[])
     g_loop = &loop;
     InetAddress listenAddr(port);
     ChatServer server(&loop, listenAddr, "ChatServer");
+    g_server = &server;
 
     LOG_INFO("ChatServer started on port %d", port);
+    // ⭐ 预热：提前初始化 ChatService + ConnectionPool
+    // 避免第一个请求时阻塞 muduo IO 线程
+    ChatService::instance();
+    ConnectionPool::instance();
     server.start();
     ChatService::instance()->startHeartbeat(&loop);
     loop.loop();
 
     LOG_INFO("ChatServer stopped.");
     Logger::instance()->shutdown();
-    return 0;
+    // ⚠️ 临时：强制退出，绕过 muduo TcpServer 析构阻塞
+    // TODO: 后续添加 ChatServer::stop() 优雅清理
+    _exit(0);
 }

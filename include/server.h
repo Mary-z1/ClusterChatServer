@@ -10,12 +10,13 @@ using namespace muduo::net;
 
 class ChatServer {
 public:
-    ChatServer(EventLoop* loop, const InetAddress& addr, const std::string& name);
+    ChatServer(EventLoop* loop, const InetAddress& addr, const string& name);
+    ~ChatServer();
     void start();
-
+    void stop();   // ⭐ 新增
 private:
     void onConnection(const TcpConnectionPtr& conn);
     void onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp time);
-
     TcpServer server_;
+    bool stopped_ = false;
 };

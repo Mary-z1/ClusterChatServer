@@ -2,6 +2,7 @@
 #include "logger.h"
 #include "config.h" 
 #include <iostream>
+#include <chrono>
 
 MySQL::MySQL() : conn_(nullptr), alive_(false) {}
 
@@ -20,6 +21,12 @@ bool MySQL::connect(const std::string& host, int port,
         LOG_ERROR("[DB] mysql_init failed");
         return false;
     }
+
+    // ⭐ 设置连接超时 3 秒，避免阻塞事件循环
+    int timeout = 3;
+    mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+    mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &timeout);
+    mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
 
     if (!mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(),
                             dbname.c_str(), port, nullptr, 0)) {
@@ -63,30 +70,41 @@ ConnectionPool::ConnectionPool()
     password_ = cfg->getString("mysql", "password", "123456");
     dbname_   = cfg->getString("mysql", "db",       "chat");
     maxSize_  = cfg->getInt(   "mysql", "poolSize", 4);
-    int initSize = maxSize_;
 
-    sem_init(&sem_, 0, maxSize_);
-    initPool(initSize);
+    LOG_INFO("[Pool] initializing, host=%s:%d db=%s poolSize=%d",
+             host_.c_str(), port_, dbname_.c_str(), maxSize_);
+
+    // ⭐ 修复：信号量初始值应为 0，每个成功连接 sem_post
+    sem_init(&sem_, 0, 0);
+
+    initPool(maxSize_);
 }
 // ========== 初始化连接池 ==========
 void ConnectionPool::initPool(int size) {
+    int success = 0;
     for (int i = 0; i < size; ++i) {
         MySQL* mysql = new MySQL();
         if (mysql->connect(host_, port_, user_, password_, dbname_)) {
             std::lock_guard<std::mutex> lock(mtx_);
             pool_.push(mysql);
             sem_post(&sem_);
+            success++;
         } else {
             delete mysql;
         }
     }
-    if (!pool_.empty()) {
+
+    if (success > 0) {
         initOk_.store(true);
+        LOG_INFO("[Pool] init OK: %d/%d connections", success, size);
+    } else {
+        LOG_ERROR("[Pool] init FAILED: 0/%d connections (MySQL not running?)", size);
     }
 }
 
 // ========== 获取连接（信号量阻塞等待 + 重连） ==========
 std::shared_ptr<MySQL> ConnectionPool::getConnection() {
+    LOG_DEBUG("[Pool] getConnection() called, initOk=%d", initOk_.load());
     // 如果池子坏了，尝试重连
     if (!initOk_.load()) {
         tryReconnect();

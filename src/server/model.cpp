@@ -47,8 +47,8 @@ bool UserModel::updateState(MySQL* mysql, int id, const std::string& state) {
 bool FriendModel::add(MySQL* mysql, int userid, int friendid) {
     char sql[256];
     snprintf(sql, sizeof(sql),
-             "INSERT INTO Friend (userid, friendid) VALUES (%d, %d)",
-             userid, friendid);
+             "INSERT IGNORE INTO Friend (userid, friendid) VALUES (%d, %d), (%d, %d)",
+             userid, friendid, friendid, userid);
     return mysql->update(sql);
 }
 

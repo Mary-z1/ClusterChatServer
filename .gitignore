@@ -15,3 +15,21 @@ thirdparty/muduo/
 
 # 日志
 logs/
+# 编译产物
+build/
+bin/
+
+# 运行时日志
+logs/*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# 编译数据库（断链符号链接）
+compile_commands.json
+conf/server.conf

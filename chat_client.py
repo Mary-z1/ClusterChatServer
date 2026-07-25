@@ -38,8 +38,9 @@ RECV_TIMEOUT = 1.0
     # 新增消息类型
     DEL_FRIEND_MSG, DEL_FRIEND_MSG_ACK,   # 16, 17
     QUIT_GROUP_MSG, QUIT_GROUP_MSG_ACK,    # 18, 19
-    FRIEND_LIST_MSG, GROUP_LIST_MSG,       # 20, 21
-) = range(1, 22)
+    FRIEND_STATUS_REQ, FRIEND_STATUS_ACK,  # 20, 21
+    FRIEND_LIST_MSG, GROUP_LIST_MSG,       # 22, 23
+) = range(1, 24)
 
 # ═══════════════════════════════════════════════════════════
 # ANSI 颜色
@@ -223,6 +224,15 @@ class CherryChatClient:
             for f in friends:
                 self._friends[f["id"]] = {"name": f["name"], "online": f.get("online", False)}
 
+        elif msgid == FRIEND_STATUS_ACK:
+            friends = msg.get("friends", [])
+            for f in friends:
+                fid = f["id"]
+                if fid in self._friends:
+                    self._friends[fid]["online"] = f.get("online", False)
+                else:
+                    self._friends[fid] = {"name": f["name"], "online": f.get("online", False)}
+
         elif msgid == GROUP_LIST_MSG:
             groups = msg.get("groups", [])
             for g in groups:
@@ -347,6 +357,9 @@ class CherryChatClient:
     def do_friend_list(self):
         while self._running and self._connected:
             _clear()
+            # ⭐ 进入好友列表时请求刷新状态
+            self._send({"msgid": FRIEND_STATUS_REQ, "id": self.user_id})
+            time.sleep(0.3)
             self._draw_header("👤 我的好友", f"共 {len(self._friends)} 位好友")
             print()
             if not self._friends:
